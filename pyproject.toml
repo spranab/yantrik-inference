@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yantrik-inference"
+version = "0.1.0"
+description = "Typed decisions and chat from one loaded model: read many answers from a single forward pass instead of generating them."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Pranab" }]
+keywords = ["llm", "inference", "structured-output", "llama.cpp", "classification", "local"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.23",
+  "jinja2>=3.0",
+]
+
+[project.optional-dependencies]
+# llama-cpp-python is deliberately not a hard dependency: the wheel you want
+# depends on your accelerator, and a CPU wheel installed by accident is the
+# difference between 2 seconds and 30. See the README.
+cpu = ["llama-cpp-python>=0.3.30"]
+hub = ["huggingface_hub>=0.23"]
+dev = ["pytest>=7", "huggingface_hub>=0.23"]
+
+[project.scripts]
+yantrik-inference = "yantrik_inference.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/spranab/yantrik-inference"
+Issues = "https://github.com/spranab/yantrik-inference/issues"
+
+[tool.setuptools.packages.find]
+include = ["yantrik_inference*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
