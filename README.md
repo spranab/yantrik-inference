@@ -92,9 +92,10 @@ yantrik-inference serve -m model.gguf \
   --chat-pool 1   --chat-ctx 32768
 ```
 
-Decide workers want short records split many ways; 8k over 16 sequences gives 512
-tokens for a record plus a question, and a smaller context is measurably faster.
-Chat wants one long sequence, so it gets 32k to itself.
+Decide workers split their budget across sequences, one per question: 8k over 8
+gives 1024 tokens for a record plus a question. Chat wants one long sequence, so
+it gets 32k to itself. Keep `--decide-seq` to the number of fields you actually
+ask at once — see the sizing note below for why.
 
 Measured on a 27B on one RTX 3090 Ti, three routing questions per call:
 
