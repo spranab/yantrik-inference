@@ -22,14 +22,15 @@ from .reader import Answer, Field, FieldReader  # noqa: F401
 def open_model(path: str, *, decide_ctx: int = 24576, decide_seq: int = 24,
                chat_ctx: int = 16384, kv_type: str = "q8_0", n_batch: int = 2048,
                n_gpu_layers: int = -1, main_gpu: int = 0, split: bool = False,
-               with_chat: bool = True):
+               with_chat: bool = True, guard: bool = True):
     """Load once, return (FieldReader, ChatEngine | None)."""
     from .chat import ChatEngine
     llm, C = load_model(path, n_ctx=decide_ctx, n_batch=n_batch, n_seq=decide_seq,
                         n_gpu_layers=n_gpu_layers, main_gpu=main_gpu, split=split,
                         kv_type=kv_type)
     head, tail = chat_parts(llm)
-    reader = FieldReader(llm, C, head, tail, decide_seq, decide_ctx // decide_seq)
+    reader = FieldReader(llm, C, head, tail, decide_seq, decide_ctx // decide_seq,
+                         guard=guard)
     chat = ChatEngine(llm, C, chat_ctx, n_batch, kv_type=kv_type) if with_chat else None
     return reader, chat
 

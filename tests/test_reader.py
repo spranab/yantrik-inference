@@ -75,10 +75,20 @@ class _FakeReader:
         self._first = {}
         self._ids = {}
 
-    def tok(self, s, bos=False):
-        # a crude BPE stand-in: the first "token" is the leading 3 characters
-        key = s[:3]
-        return [self._ids.setdefault(key, len(self._ids) + 1)]
+    def tok(self, s, bos=False, special=True):
+        # a crude BPE stand-in: a leading space is its own token (as real
+        # tokenizers do for digits), then the first 3 characters
+        out = []
+        if s.startswith(" "):
+            out.append(self._ids.setdefault(" ", 1)); s = s[1:]
+        out.append(self._ids.setdefault(s[:3], len(self._ids) + 2))
+        return out
+
+    class _LLM:
+        @staticmethod
+        def detokenize(ids):
+            return b" " if ids[0] == 1 else b"x"
+    llm = _LLM()
 
 
 def test_first_tokens_covers_spacing_and_case():
@@ -98,3 +108,31 @@ def test_colliding_options_are_rejected():
     assert ok == []
     bad = r.check_options([Field("q", ("approve", "approved"))])
     assert bad and "same token" in bad[0]
+
+
+def test_guard_frames_the_record_as_data():
+    """Without the guard, text inside a record steers the answer. Measured on
+    Qwen3.8-27B: a fake system turn flipped an urgency answer to 'high' at 86%
+    confidence; with the guard it stays 'low' at 98%."""
+    from yantrik_inference.reader import GUARD, FieldReader
+
+    class R:
+        guard = True
+        framed = FieldReader.framed
+
+    r = R()
+    out = r.framed("PAYLOAD")
+    assert "PAYLOAD" in out
+    assert "<record>" in out and "untrusted" in out
+    R.guard = False
+    assert R().framed("PAYLOAD") == "PAYLOAD"
+
+
+def test_whitespace_only_first_tokens_are_dropped():
+    """' 1' tokenizes as [space, '1'] in most tokenizers, so the space carries no
+    information and every digit option would share it."""
+    r = _FakeReader()
+    ids = r.first_tokens("1")
+    space_id = r._ids.get(" ")
+    assert space_id not in ids, "a bare space must never be a scoring token"
+    assert ids, "an option must always have at least one scoring token"

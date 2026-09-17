@@ -27,7 +27,7 @@ class Service:
 
     def __init__(self, model_path: str, limits: Limits, *, n_batch: int = 2048,
                  n_gpu_layers: int = -1, main_gpu: int = 0, split: bool = False,
-                 sample_fields: int = 10, verbose: bool = False):
+                 sample_fields: int = 10, verbose: bool = False, guard: bool = True):
         t0 = time.time()
         # Batch size only moves the compute buffer (about 0.5 GB at 512 against
         # 2.0 GB at 2048 on a 27B), so size each pool to the largest batch it will
@@ -54,7 +54,7 @@ class Service:
                                      n_batch=decide_batch, n_seq=limits.decide_seq,
                                      kv_type=limits.kv_type, verbose=verbose).ctx
             return FieldReader(self.llm, self.C, head, tail, limits.decide_seq,
-                               limits.per_seq, ctx=ctx)
+                               limits.per_seq, ctx=ctx, guard=guard)
 
         def make_chat(i: int) -> ChatEngine:
             return ChatEngine(self.llm, self.C, limits.chat_ctx, chat_batch,

@@ -34,6 +34,9 @@ def _model_args(p):
                    help="-1 for all on GPU, 0 for CPU only")
     p.add_argument("--main-gpu", type=int, default=0)
     p.add_argument("--split", action="store_true", help="split layers across GPUs")
+    p.add_argument("--no-guard", action="store_true",
+                   help="do not wrap the record as untrusted data; without the guard, "
+                        "text inside a record can steer the answer")
     p.add_argument("--verbose", action="store_true")
 
 
@@ -74,7 +77,7 @@ def cmd_serve(args) -> int:
               f"record plus a question", file=sys.stderr)
     svc = Service(resolve_model(args.model), limits, n_batch=args.n_batch,
                   n_gpu_layers=args.gpu_layers, main_gpu=args.main_gpu,
-                  split=args.split, verbose=args.verbose)
+                  split=args.split, verbose=args.verbose, guard=not args.no_guard)
     serve(svc, args.host, args.port)
     return 0
 
@@ -111,7 +114,8 @@ def cmd_decide(args) -> int:
                         n_gpu_layers=args.gpu_layers, main_gpu=args.main_gpu,
                         split=args.split, kv_type=args.kv_type, verbose=args.verbose)
     head, tail = chat_parts(llm)
-    reader = FieldReader(llm, C, head, tail, limits.decide_seq, limits.per_seq)
+    reader = FieldReader(llm, C, head, tail, limits.decide_seq, limits.per_seq,
+                         guard=not args.no_guard)
     answers = reader.read(record, fields)
     if args.json:
         print(json.dumps([dict(question=a.question, answer=a.answer,
