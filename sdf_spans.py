@@ -76,15 +76,29 @@ STOP_NAMES = {"the", "this", "that", "new", "united states", "privacy policy",
               "terms of service", "sign in", "read more", "getting started"}
 
 
-def _clean(s: str, limit=110) -> str:
-    s = re.sub(r"\s+", " ", (s or "")).strip(" \t-–—|·•")
-    return s[:limit]
+def _clean(s: str, limit=190, stamp=True) -> str:
+    """Tidy a span, and drop a leading date or time stamp.
+
+    Cloudflare renders "September 16, 2026 When scanners miss the attack: ..."
+    on one line, so the headline candidate carried a date prefix AND was cut
+    at 110 characters. Neither the gold nor the candidate then contained the
+    other, and a correct span scored as a miss. Strip the stamp, keep more.
+
+    Not for date candidates: stripping the stamp there deletes the value
+    itself, which took date coverage from 0.81 to 0.08 until caught.
+    """
+    s = re.sub(r"\s+", " ", (s or "")).strip()
+    if stamp:
+        s = re.sub(r"^(?:" + MONTHS + r")\.?\s+\d{1,2},?\s+\d{4}\s*", "", s, flags=re.I)
+        s = re.sub(r"^\d{4}-\d{2}-\d{2}(?:[T ]\S+)?\s*", "", s)
+        s = re.sub(r"^\d{1,2}:\d{2}\s*(?:am|pm)?(?:\s+\w{2,4})?\s*[|-]?\s*", "", s, flags=re.I)
+    return s.strip(" 	-–—|·•")[:limit]
 
 
-def _dedupe(items: List[str], cap: int) -> List[str]:
+def _dedupe(items: List[str], cap: int, stamp=True) -> List[str]:
     out, seen = [], set()
     for x in items:
-        x = _clean(x)
+        x = _clean(x, stamp=stamp)
         k = re.sub(r"[^a-z0-9]+", "", x.lower())
         if not k or k in seen or len(x) < 2:
             continue
@@ -131,39 +145,123 @@ def _slug_words(url: str):
     return {w for w in re.split(r"[-_]+", tail.lower()) if len(w) > 3}
 
 
+FUNC = {"the", "a", "an", "to", "of", "in", "on", "for", "and", "with", "how",
+        "why", "what", "is", "are", "was", "were", "can", "will", "your", "its",
+        "that", "this", "from", "at", "by", "as", "it", "but", "not", "you",
+        "every", "more", "than", "into", "after", "over", "when", "while"}
+
+
+def _sentence_like(line: str) -> float:
+    """How much a line reads as prose rather than a list of tags.
+
+    Navigation and tag strips repeat the same keywords as the headline, so slug
+    overlap alone ranked "AI Application Security Client-Side Security
+    Cybersecurity Developer" above "When scanners miss the attack: how
+    Cloudflare Client-Side Security protects storefronts". A headline is a
+    sentence: it contains function words and is not all capitalised.
+    """
+    words = line.split()
+    if not words:
+        return 0.0
+    lower = [w for w in words if w[:1].islower()]
+    funcs = sum(1 for w in words if w.lower().strip(",.:;") in FUNC)
+    capital_run = sum(1 for w in words if w[:1].isupper()) / len(words)
+    score = min(funcs, 5) / 5.0 + len(lower) / max(1, len(words))
+    if capital_run > 0.7:
+        score -= 1.0
+    return score
+
+
+def _slug_words(url: str):
+    """Content words from the URL path.
+
+    A news URL almost always carries the headline as a slug. The URL is an input
+    to the converter, not markup, so using it to rank candidates is fair, and it
+    separates the real headline from the promotional banners a site puts above
+    it. Without this, TechCrunch's "Save up to $300 on Disrupt" outranked the
+    actual title on every article.
+    """
+    from urllib.parse import urlparse
+    tail = urlparse(url or "").path.rstrip("/").split("/")[-1]
+    return {w for w in re.split(r"[-_]+", tail.lower()) if len(w) > 3}
+
+
 def headlines(text: str, url: str = "", cap=12) -> List[str]:
-    """Title-shaped lines, ranked by agreement with the URL slug."""
+    """Title-shaped lines, ranked by URL agreement and by reading like prose."""
     lines = _content_lines(text)
     slug = _slug_words(url)
     scored = []
     for i, l in enumerate(lines[:150]):
-        if not (18 <= len(l) <= 170) or len(l.split()) < 4:
+        if not (12 <= len(l) <= 240) or len(l.split()) < 2:
             continue
         if l.endswith((".", ":", ";", ",")) and len(l.split()) > 14:
             continue
         words = {w for w in re.split(r"[^a-z0-9]+", l.lower()) if len(w) > 3}
         overlap = len(words & slug) / max(1, len(slug))
-        scored.append((-overlap * 100 + i / 10.0, l))
+        scored.append((-overlap * 100 - _sentence_like(l) * 20 + i / 10.0, l))
     scored.sort()
     return _dedupe([l for _, l in scored], cap)
 
 
+TIMEISH = re.compile(r"(\d{1,2}:\d{2}\s*(?:am|pm)?|\bago\b|\d{4})", re.I)
+NAME_LINE = re.compile(
+    r"^[A-Z][a-z’\'\-]{1,15}"
+    r"(?:\s+(?:[A-Z]\.|[A-Z][a-z’\'\-]{1,15}|van|von|de|del|da|di|bin|al)){1,3}$")
+
+
 def authors(text: str, cap=12) -> List[str]:
+    """Names, ranked by how a byline actually sits on a page.
+
+    The first version scanned the first sixty content lines for capitalised
+    word pairs. On a modern news site those sixty lines are the navigation bar,
+    so the byline never appeared: TechCrunch gave "Disrupt Close" and "Desktop
+    Logo" while "Sean O'Kane" sat on its own line further down, between the
+    headline and the timestamp.
+
+    So look at the whole page, and rank by shape rather than position. An
+    explicit "By X" wins. Next is a line that is nothing but a person-shaped
+    name, which is how every byline is rendered, and most of all one sitting
+    next to a line that looks like a date or a time.
+    """
     lines = _content_lines(text)
-    head = "\n".join(lines[:60])
-    out = [m.group(1) for m in BYLINE_RE.finditer("\n".join(lines))]
-    out += [m.group(1) for m in re.finditer(r"\bBy\s+([A-Z][^,\n]{2,40}?)"
-                                            r"(?:\s*[,|]|\s+on\b|$)", head)]
-    out += [m.group(1) for m in NAME_RE.finditer(head)]
-    out = [x.strip() for x in out]
-    out = [x for x in out if x.lower() not in STOP_NAMES
-           and not re.match(r"(?:" + MONTHS + r")\b", x, re.I)
-           and not NAV.match(x)]
-    return _dedupe(out, cap)
+    scored = {}
+
+    def offer(name, score):
+        name = name.strip(" ,|\u00b7\u2022")
+        if not name or len(name) > 44 or NAV.match(name):
+            return
+        if name.lower() in STOP_NAMES or re.match(r"(?:" + MONTHS + r")" + chr(92) + "b",
+                                                  name, re.I):
+            return
+        if any(ch.isdigit() for ch in name):
+            return
+        key = re.sub(r"[^a-z]+", "", name.lower())
+        if key and score > scored.get(key, (-1e9, ""))[0]:
+            scored[key] = (score, name)
+
+    joined = "\n".join(lines)
+    for m in BYLINE_RE.finditer(joined):
+        offer(m.group(1), 100)
+    for m in re.finditer(r"\bBy\s+([A-Z][^,\n]{2,40}?)(?:\s*[,|]|\s+on\b|$)", joined):
+        offer(m.group(1), 90)
+
+    for i, l in enumerate(lines):
+        if NAME_LINE.match(l):
+            near = any(TIMEISH.search(lines[j])
+                       for j in (i - 2, i - 1, i + 1, i + 2)
+                       if 0 <= j < len(lines))
+            offer(l, (60 if near else 30) - i / 500.0)
+
+    for m in NAME_RE.finditer("\n".join(lines[:80])):
+        offer(m.group(1), 5)
+
+    ranked = sorted(scored.values(), key=lambda x: -x[0])
+    return _dedupe([n for _, n in ranked], cap)
 
 
 def dates(text: str, cap=10) -> List[str]:
-    return _dedupe([m.group(0) for m in DATE_RE.finditer(text or "")], cap)
+    return _dedupe([m.group(0) for m in DATE_RE.finditer(text or "")],
+                   cap, stamp=False)
 
 
 def prices(text: str, cap=8) -> List[str]:

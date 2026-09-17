@@ -14,3 +14,6 @@ runs/
 .idea/
 .vscode/
 sdf_out/
+_sum*.txt
+_msg.txt
+_patch.py

@@ -34,7 +34,7 @@ import time
 import numpy as np
 
 from yantrik_inference import Field, open_model
-from probe_extract import feed_urls
+from probe_extract import FEEDS, feed_urls_for
 from sdf_convert import UA, allowed, api_url, typed_fields, ENTITY_TYPES, BCP47
 from probe_sdf import PARENTS, record_for, type_path
 
@@ -111,12 +111,68 @@ def make_sdf(reader, chat, p, budget):
     return doc
 
 
+SENT = re.compile(r"(?<=[.!?])\s+")
+
+
+def sentences(text, lo=40, hi=320):
+    out = []
+    for para in (text or "").split("\n"):
+        for s in SENT.split(para):
+            s = s.strip()
+            if lo <= len(s) <= hi and " " in s:
+                out.append(s)
+    return out
+
+
+def make_extractive(reader, doc, p, n_tokens, batch=16):
+    """The same metadata, but with sentences SELECTED from the page.
+
+    The abstractive summary loses specific detail, which is exactly what an
+    agent asks about. Selecting sentences instead keeps the page's own wording,
+    cannot invent anything, and is itself a typed read: each sentence is scored
+    for whether it states something concrete, in batches over one prefill of the
+    page.
+    """
+    sents = sentences(p["text"])[:96]
+    if not sents:
+        return None
+    keep = []
+    for i in range(0, len(sents), batch):
+        chunk = sents[i:i + batch]
+        fs = [Field(f"Sentence {j + 1}: {c}\n\nDoes this sentence state a specific "
+                    f"checkable fact, such as a number, name, date or mechanism, "
+                    f"rather than framing or opinion?", ("yes", "no"))
+              for j, c in enumerate(chunk)]
+        got = reader.read(p["text"][:6000], fs)
+        for c, g in zip(chunk, got):
+            score = g.confidence if g.answer == "yes" else -g.confidence
+            keep.append((score, c))
+    keep.sort(key=lambda x: -x[0])
+    order = {c: i for i, c in enumerate(sents)}
+    picked, used = [], 0
+    for score, c in keep:
+        t = len(reader.tok(c, special=False)) + 2
+        if used + t > n_tokens:
+            continue
+        picked.append(c)
+        used += t
+        if used >= n_tokens - 20:
+            break
+    picked.sort(key=lambda c: order.get(c, 0))     # restore reading order
+    out = dict(doc)
+    out["summary"] = {"brief": (doc.get("summary") or {}).get("brief", "")}
+    out["claims"] = picked
+    return out
+
+
 def make_questions(chat, p, k=6):
     """Questions about this page, four options each. The answer key is unused."""
     out = gen(chat, f"{p['text'][:9000]}\n\nWrite {k} multiple-choice questions "
-                    "about specific facts stated in this page. Each must have four "
-                    "plausible options, only one supported by the page. Do not ask "
-                    "about the title or the author. Reply with JSON only: "
+                    "about SPECIFIC DETAILS buried in the body of this page: exact "
+                    "numbers, named mechanisms, conditions, limits, sequences of "
+                    "steps. A reader who saw only the title and URL must have no "
+                    "way to answer. Each needs four plausible options, only one "
+                    "supported by the page. Reply with JSON only: "
                     '[{"q": "...", "options": ["...", "...", "...", "..."]}]', 900)
     qs = as_json(out)
     if not isinstance(qs, list):
@@ -159,10 +215,18 @@ def main():
     budget = reader.per_seq - 120
     tok = lambda s: reader.tok(reader.head + reader.framed(s), bos=True)
 
-    urls = feed_urls()
-    print(f"  {len(urls)} candidate URLs; using the first {n} that fetch\n")
+    # Interleave the feeds. Draining them in order gave twelve pages from one
+    # blog, which is a sample of one site rather than of the web.
+    per = [feed_urls_for(f) for f in FEEDS]
+    urls = [u for row in zip(*[p + [None] * 20 for p in per]) for u in row if u]
+    urls = list(dict.fromkeys(urls))
+    print(f"  {len(urls)} candidate URLs interleaved across {len(FEEDS)} feeds; "
+          f"using the first {n} that fetch\n")
 
     rows, sizes = [], []
+    CONDS = ("full page", "SDF document", "SDF + selected sentences",
+             "same-size page", "url+title")
+    hard = {k: [] for k in CONDS}
     for u in urls:
         if len(rows) >= n:
             break
@@ -185,7 +249,10 @@ def main():
             reader.tok(p["text"], special=False)[:n_doc]).decode("utf-8", "replace")
         floor = f"URL: {p['url']}\nTitle: {p['title']}"
 
+        ext = make_extractive(reader, doc, p, n_doc)
+        ext_text = json.dumps(ext, ensure_ascii=False, indent=1) if ext else floor
         conds = {"full page": p["text"], "SDF document": doc_text,
+                 "SDF + selected sentences": ext_text,
                  "same-size page": trunc, "url+title": floor}
         ans, toks = {}, {}
         for name, ctx in conds.items():
@@ -193,12 +260,19 @@ def main():
             ans[name] = [x.answer for x in a]
             toks[name] = t
         ref = ans["full page"]
+        # A question the URL and title already answer tells us nothing about
+        # either artefact. Track those separately rather than letting them
+        # compress every condition into the same narrow band.
+        needs_page = [f != r for f, r in zip(ans["url+title"], ref)]
+        for k, v in ans.items():
+            hard[k] += [x == y for x, y, nd in zip(v, ref, needs_page) if nd]
         rows.append({k: np.mean([x == y for x, y in zip(v, ref)])
                      for k, v in ans.items()} | {"nq": len(qs)})
         sizes.append(toks | {"html_kb": p["html_bytes"] / 1024, "build_s": build_s})
         print(f"  {p['url'][8:66]:66s} {len(qs)}q  "
-              + "  ".join(f"{k}={rows[-1][k]:.2f}" for k in
-                          ("SDF document", "same-size page", "url+title")))
+              + "  ".join(f"{k.split()[-1]}={rows[-1][k]:.2f}" for k in
+                          ("SDF document", "SDF + selected sentences",
+                           "same-size page")))
 
     if not rows:
         print("  no usable pages")
@@ -206,9 +280,16 @@ def main():
     nq = sum(r["nq"] for r in rows)
     print(f"\n  {len(rows)} pages, {nq} questions, agreement with the full-page answer\n")
     print(f"  {'context given':18s} {'tokens':>8s} {'agreement':>10s}")
-    for k in ("full page", "SDF document", "same-size page", "url+title"):
+    for k in CONDS:
         t = np.mean([s[k] for s in sizes])
         print(f"  {k:18s} {t:8.0f} {np.mean([r[k] for r in rows]):10.3f}")
+    nh = len(hard["SDF document"])
+    if nh:
+        print(f"\n  restricted to the {nh} questions the URL and title do NOT answer:\n")
+        print(f"  {'context given':18s} {'agreement':>10s}")
+        for k in ("SDF document", "SDF + selected sentences", "same-size page"):
+            print(f"  {k:18s} {np.mean(hard[k]):10.3f}")
+
     print(f"\n  page HTML averages {np.mean([s['html_kb'] for s in sizes]):.0f} KB; "
           f"the document is {np.mean([s['SDF document'] for s in sizes]):.0f} tokens")
     print(f"  building one document took {np.mean([s['build_s'] for s in sizes]):.1f} s")

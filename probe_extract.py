@@ -39,13 +39,35 @@ FEEDS = ("https://blog.cloudflare.com/rss/",
          "https://techcrunch.com/feed/",
          "https://arstechnica.com/feed/",
          "https://www.theguardian.com/world/rss",
-         "https://www.theguardian.com/science/rss")
+         "https://www.theguardian.com/science/rss",
+         "https://www.theguardian.com/technology/rss",
+         "https://www.theguardian.com/business/rss",
+         "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml")
 
 QUESTION = {
     "headline": "Which lettered headline candidate is this page's actual title?",
     "author": "Which lettered author candidate is the person who wrote this page?",
     "publish_date": "Which lettered date candidate is when this page was published?",
 }
+
+
+def feed_urls_for(feed, limit=14):
+    """Article links from one feed, so callers can interleave sources."""
+    import httpx
+    try:
+        r = httpx.get(feed, headers={"User-Agent": UA}, timeout=25,
+                      follow_redirects=True)
+    except Exception:                                     # noqa: BLE001
+        return []
+    links = re.findall(r"<link>\s*(https?://[^<\s]+?)\s*</link>", r.text)
+    links += re.findall(r'<link[^>]+href="(https?://[^"]+)"[^>]*/?>', r.text)
+    # An article URL is anything with a path. Counting slashes dropped every
+    # Cloudflare post, whose URLs are a single slug under the host.
+    from urllib.parse import urlparse
+    good = [u for u in links
+            if not u.rstrip("/").endswith(("rss", "feed"))
+            and len(urlparse(u).path.strip("/")) > 3]
+    return list(dict.fromkeys(good))[:limit]
 
 
 def feed_urls(limit_per_feed=14):
