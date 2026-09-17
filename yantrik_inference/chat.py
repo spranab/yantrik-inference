@@ -15,10 +15,12 @@ from .engine import Memory, decode, second_context
 
 class ChatEngine:
     def __init__(self, llm, C, n_ctx: int, n_batch: int, kv_type: str = "q8_0",
-                 verbose: bool = False):
+                 verbose: bool = False, lctx=None):
+        """`lctx` lets a pool supply an already-built context; otherwise one is
+        created over the same weights."""
         self.llm, self.C = llm, C
-        self.lctx = second_context(llm, C, n_ctx=n_ctx, n_batch=n_batch,
-                                   kv_type=kv_type, verbose=verbose)
+        self.lctx = lctx if lctx is not None else second_context(
+            llm, C, n_ctx=n_ctx, n_batch=n_batch, kv_type=kv_type, verbose=verbose)
         self.ctx = self.lctx.ctx
         self.mem = Memory(C, self.ctx)
         self.n_ctx, self.n_vocab = n_ctx, llm.n_vocab()

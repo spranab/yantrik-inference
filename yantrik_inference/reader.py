@@ -52,12 +52,16 @@ class Answer:
 
 
 class FieldReader:
-    def __init__(self, llm, C, head: str, tail: str, max_fields: int, per_seq: int):
+    def __init__(self, llm, C, head: str, tail: str, max_fields: int, per_seq: int,
+                 ctx=None):
+        """`ctx` selects which context to read through. It defaults to the one
+        the model was loaded with; a pool passes its own, so several readers can
+        share the weights and work at the same time."""
         self.llm, self.C = llm, C
         self.head, self.tail = head, tail
         self.max_fields, self.per_seq = max_fields, per_seq
-        self.mem = Memory(C, llm._ctx.ctx)
-        self.ctx = llm._ctx.ctx
+        self.ctx = ctx if ctx is not None else llm._ctx.ctx
+        self.mem = Memory(C, self.ctx)
         self.n_vocab = llm.n_vocab()
         self._first: dict[str, int] = {}
 

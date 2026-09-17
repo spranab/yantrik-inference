@@ -79,6 +79,44 @@ which `bench` reports as a warning rather than a plausible-looking score.
 **Run `bench` before you trust a model.** It is four lines of output and it is the
 difference between a fast answer and a fast wrong answer.
 
+## Pools, and sizing the two jobs separately
+
+The weights are read-only during inference, so many contexts can share one copy
+and run at the same time. Adding a worker costs its cache and compute buffers,
+not another copy of the model. The two jobs are sized independently because they
+are not alike:
+
+```bash
+yantrik-inference serve -m model.gguf   --decide-pool 2 --decide-ctx 8192  --decide-seq 16   --chat-pool 1   --chat-ctx 32768
+```
+
+Decide workers want short records split many ways; 8k over 16 sequences gives 512
+tokens for a record plus a question, and a smaller context is measurably faster.
+Chat wants one long sequence, so it gets 32k to itself.
+
+Measured on a 27B on one RTX 3090 Ti, three routing questions per call:
+
+| | |
+|---|---|
+| four calls one at a time | 9.74 s |
+| the same four with a pool of 2 | 3.18 s (**3.1× throughput**) |
+| a chat alone | 3.99 s |
+| the same chat while three decides run | 4.15 s |
+
+Chat is essentially unaffected by concurrent decisions, which is the point: an
+agent can route while a conversation is streaming.
+
+`GET /health` reports each pool's size, how many workers are idle, and how often a
+request had to queue — that last number is what tells you to raise a pool size.
+
+**Memory is the limit, not the design.** On a 24 GB card a 27B leaves room for
+about two decide workers and one chat worker. A context costs far more than its
+cache because of compute buffers: an 8k context is about 3.1 GB at a 2048 batch
+and 1.5 GB at 512, so each pool's batch is sized automatically to the largest one
+it will actually submit. If a pool does not fit, the server says so and builds a
+smaller one rather than failing to start.
+
+
 ## Use it
 
 ### From the command line

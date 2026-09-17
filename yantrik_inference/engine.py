@@ -33,10 +33,18 @@ class Limits:
     decide_seq: int
     chat_ctx: int
     kv_type: str
+    decide_pool: int = 1
+    chat_pool: int = 1
 
     @property
     def per_seq(self) -> int:
         return self.decide_ctx // self.decide_seq
+
+    @property
+    def cache_tokens(self) -> int:
+        """Total cached tokens across every worker, which is what the KV cache
+        costs. Weights are shared, so this is the only per-worker price."""
+        return self.decide_pool * self.decide_ctx + self.chat_pool * self.chat_ctx
 
 
 def _patch_seq_max(C, n_seq: int):
@@ -97,8 +105,9 @@ def load_model(path: str, *, n_ctx: int, n_batch: int, n_seq: int, n_gpu_layers:
 
 
 def second_context(llm, C, *, n_ctx: int, n_batch: int, kv_type: str = "q8_0",
-                   verbose: bool = False):
-    """A second context over the SAME weights, one sequence, for generation."""
+                   n_seq: int = 1, verbose: bool = False):
+    """Another context over the SAME weights. `n_seq` shapes it: 1 for a
+    conversation, many for reading typed fields."""
     import llama_cpp
     kv = KV_TYPES.get(kv_type)
     src = llm.context_params
@@ -110,7 +119,7 @@ def second_context(llm, C, *, n_ctx: int, n_batch: int, kv_type: str = "q8_0",
             setattr(p, name, getattr(src, name))
         except Exception:                            # noqa: BLE001
             pass
-    p.n_ctx, p.n_batch, p.n_ubatch, p.n_seq_max = n_ctx, n_batch, min(n_batch, 512), 1
+    p.n_ctx, p.n_batch, p.n_ubatch, p.n_seq_max = n_ctx, n_batch, min(n_batch, 512), n_seq
     if kv is not None:
         p.type_k = p.type_v = kv
         p.flash_attn_type = C.LLAMA_FLASH_ATTN_TYPE_ENABLED
@@ -118,7 +127,9 @@ def second_context(llm, C, *, n_ctx: int, n_batch: int, kv_type: str = "q8_0",
         return llama_cpp._internals.LlamaContext(model=llm._model, params=p, verbose=verbose)
     except ValueError as e:
         raise EngineError(
-            f"could not create the chat context ({e}). Try a smaller --chat-ctx."
+            f"could not create a {n_ctx}-token context ({e}). The weights are shared "
+            f"but each worker needs its own cache and compute buffers; use a smaller "
+            f"context, a smaller pool, or a smaller --n-batch."
         ) from e
 
 

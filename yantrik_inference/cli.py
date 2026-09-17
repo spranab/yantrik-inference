@@ -14,12 +14,18 @@ def _model_args(p):
     p.add_argument("--model", "-m", required=True,
                    help="path to a .gguf file, or a Hugging Face repo id "
                         "(optionally repo:filename-substring) to pull if missing")
-    p.add_argument("--decide-ctx", type=int, default=24576,
-                   help="token budget for the decide context (default 24576)")
-    p.add_argument("--decide-seq", type=int, default=24,
+    p.add_argument("--decide-ctx", type=int, default=8192,
+                   help="token budget per decide worker (default 8192; records are "
+                        "short and a smaller context is measurably faster)")
+    p.add_argument("--decide-seq", type=int, default=16,
                    help="how many fields can be read at once; the budget is "
                         "divided by this (default 24)")
-    p.add_argument("--chat-ctx", type=int, default=16384)
+    p.add_argument("--chat-ctx", type=int, default=32768,
+                   help="token budget for a conversation (default 32768)")
+    p.add_argument("--decide-pool", type=int, default=2,
+                   help="how many decide requests can run at once (default 2)")
+    p.add_argument("--chat-pool", type=int, default=1,
+                   help="how many chat requests can run at once (default 1)")
     p.add_argument("--kv-type", default="q8_0", choices=("f16", "q8_0", "q5_1", "q4_0"),
                    help="KV cache precision (default q8_0, which halves its memory "
                         "with no measured accuracy cost)")
@@ -60,7 +66,8 @@ def resolve_model(spec: str) -> str:
 
 def cmd_serve(args) -> int:
     from .server import Service, serve
-    limits = Limits(args.decide_ctx, args.decide_seq, args.chat_ctx, args.kv_type)
+    limits = Limits(args.decide_ctx, args.decide_seq, args.chat_ctx, args.kv_type,
+                    decide_pool=args.decide_pool, chat_pool=args.chat_pool)
     if limits.per_seq < 256:
         print(f"warning: each sequence gets only {limits.per_seq} tokens "
               f"({args.decide_ctx} / {args.decide_seq}), which may be too few for a "
