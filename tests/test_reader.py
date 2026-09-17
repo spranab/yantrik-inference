@@ -61,3 +61,40 @@ def test_missing_path_is_an_error_not_a_record():
         _text_or_file("data/claims/x.md", "record")
     # real text still passes through
     assert _text_or_file("Ticket 4471: the user cannot log in.", "record").startswith("Ticket")
+
+
+class _FakeReader:
+    """check_options and first_tokens only need a tokenizer, so fake one:
+    a token id per distinct string prefix."""
+    from yantrik_inference.reader import FieldReader
+    check_options = FieldReader.check_options
+    first_tokens = FieldReader.first_tokens
+    first_token = FieldReader.first_token
+
+    def __init__(self):
+        self._first = {}
+        self._ids = {}
+
+    def tok(self, s, bos=False):
+        # a crude BPE stand-in: the first "token" is the leading 3 characters
+        key = s[:3]
+        return [self._ids.setdefault(key, len(self._ids) + 1)]
+
+
+def test_first_tokens_covers_spacing_and_case():
+    """A template that ends with a newline makes the model write 'no'; one that
+    ends mid-line makes it write ' no'. Scoring one variant reads the wrong
+    token: on Llama-3.2-3B that produced 99%-confident wrong answers."""
+    r = _FakeReader()
+    ids = r.first_tokens("yes")
+    assert len(ids) >= 3            # 'yes', ' yes', 'Yes' at least
+    assert len(set(ids)) == len(ids)
+
+
+def test_colliding_options_are_rejected():
+    from yantrik_inference.reader import Field
+    r = _FakeReader()
+    ok = r.check_options([Field("q", ("yes", "no"))])
+    assert ok == []
+    bad = r.check_options([Field("q", ("approve", "approved"))])
+    assert bad and "same token" in bad[0]

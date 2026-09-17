@@ -54,6 +54,31 @@ sequential passes. On the same model and card that is 24 tokens/s with a
 one-second first token. The point of this project is to keep decisions out of
 that path, not to make that path faster.
 
+## Which models work
+
+Any GGUF that your llama.cpp build can load. Measured here on 12 fields, 4 cases,
+with the majority baseline at 0.729 — a model scoring below that is guessing, and
+`bench` says so:
+
+| model | accuracy | s/case |
+|---|---|---|
+| Qwen3.8-27B | 1.000 | 0.98 |
+| Qwen2.5-14B | 1.000 | 0.50 |
+| Qwen3.5-4B | 1.000 | 0.25 |
+| gemma-2-2b-it | 1.000 | 0.17 |
+| Qwen3.5-2B | 0.979 | 0.16 |
+| Qwen3.5-0.8B | 0.938 | 0.14 |
+| Llama-3.2-3B | 0.896 | 0.16 |
+| Qwen2.5-0.5B | 0.708 | 0.12 | ← below the baseline; too small for the job |
+
+Three template families (ChatML, Llama 3, Gemma) and two architectures (dense and
+hybrid linear-attention) load and answer without any per-model configuration. The
+practical floor is about 2B: below that a model tends to collapse onto one answer,
+which `bench` reports as a warning rather than a plausible-looking score.
+
+**Run `bench` before you trust a model.** It is four lines of output and it is the
+difference between a fast answer and a fast wrong answer.
+
 ## Use it
 
 ### From the command line

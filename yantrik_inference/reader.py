@@ -65,12 +65,47 @@ class FieldReader:
     def tok(self, s: str, bos: bool = False) -> List[int]:
         return self.llm.tokenize(s.encode(), add_bos=bos, special=True)
 
-    def first_token(self, option: str) -> int:
-        """Id of the first token of ' option'. Lowercase, because models rank the
-        lowercase form above the capitalised one at this position."""
+    def first_tokens(self, option: str) -> List[int]:
+        """Every plausible first token for this option.
+
+        Which one the model actually uses depends on the chat template. ChatML
+        ends the prompt with a newline, so the model writes `no`; a template that
+        ends mid-line expects ` no`. Scoring only one variant reads the wrong
+        token and the ranking between options becomes arbitrary: on
+        Llama-3.2-3B, scoring only ` yes`/` no` gave 99%-confident wrong answers
+        while the model's actual top token was `no` at a much higher logit.
+
+        So score every variant and take each option's best.
+        """
         if option not in self._first:
-            self._first[option] = self.tok(" " + option)[0]
+            seen, out = set(), []
+            for cand in (option, " " + option, option.capitalize(),
+                         " " + option.capitalize(), option.upper()):
+                ids = self.tok(cand)
+                if ids and ids[0] not in seen:
+                    seen.add(ids[0]); out.append(ids[0])
+            self._first[option] = out
         return self._first[option]
+
+    def first_token(self, option: str) -> int:
+        """The most likely single id, kept for callers that want one."""
+        return self.first_tokens(option)[0]
+
+    def check_options(self, fields: Sequence[Field]) -> List[str]:
+        """Options within a field must be distinguishable by their first token.
+        'approve' and 'approved' are not, and would silently alias."""
+        problems = []
+        for f in fields:
+            first = {}
+            for o in f.options:
+                for t in self.first_tokens(o):
+                    if t in first and first[t] != o:
+                        problems.append(
+                            f"{f.question!r}: {first[t]!r} and {o!r} start with the "
+                            f"same token, so they cannot be told apart")
+                        break
+                    first.setdefault(t, o)
+        return problems
 
     def suffix(self, f: Field) -> str:
         return (f"\n\nQuestion: {f.question}\nAnswer with exactly one word from: "
@@ -84,6 +119,9 @@ class FieldReader:
             raise ValueError(
                 f"{len(fields)} questions but this context holds {self.max_fields} "
                 f"sequences; start the server with a larger --decide-seq")
+        problems = self.check_options(fields)
+        if problems:
+            raise ValueError("; ".join(problems))
         self.mem.clear()
         prefix = self.tok(self.head + record, bos=True)
         P = len(prefix)
@@ -135,8 +173,9 @@ class FieldReader:
         import numpy as np
         out = []
         for logits, f in zip(rows, fields):
-            ids = [self.first_token(o) for o in f.options]
-            v = np.array([logits[i] for i in ids], dtype=np.float64)
+            # each option scores as its best spelling at this position
+            v = np.array([max(float(logits[i]) for i in self.first_tokens(o))
+                          for o in f.options], dtype=np.float64)
             e = np.exp(v - v.max()); p = e / e.sum()
             j = int(p.argmax())
             out.append(Answer(f.question, f.options[j], float(p[j])))

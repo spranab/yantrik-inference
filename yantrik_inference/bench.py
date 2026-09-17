@@ -92,6 +92,23 @@ def run(model_path: str, *, cases: int = 10, fields: int = 28, limits: Limits,
 
     # agreement between the batched read and the sequential one: the mechanism
     # should not change answers, only how long they take
+    # A model too weak for this collapses onto one answer and scores below the
+    # majority baseline while still returning confident-looking output. Say so,
+    # loudly: this is the difference between a slow answer and a wrong one.
+    par = results["parallel"]
+    flat = preds.get("parallel") or []
+    seen = {v for case in flat for v in case}
+    if par["accuracy"] < base:
+        print(f"\n  WARNING: {par['accuracy']:.3f} is below the majority baseline "
+              f"({base:.3f}). This model is not usable for typed decisions; "
+              f"guessing the commonest answer would do better.")
+        if len(seen) == 1:
+            print(f"  It answered {seen.pop()!r} to every question, which is the "
+                  f"classic signature of a model that cannot do the task.")
+    elif len(seen) == 1:
+        print(f"\n  WARNING: every answer was {seen.pop()!r}. The score may be an "
+              f"artefact of an unbalanced task rather than real skill.")
+
     a, b = preds.get("parallel"), preds.get("one at a time, cached")
     agree = None
     if a and b:
