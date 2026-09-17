@@ -87,7 +87,9 @@ not another copy of the model. The two jobs are sized independently because they
 are not alike:
 
 ```bash
-yantrik-inference serve -m model.gguf   --decide-pool 2 --decide-ctx 8192  --decide-seq 16   --chat-pool 1   --chat-ctx 32768
+yantrik-inference serve -m model.gguf \
+  --decide-pool 2 --decide-ctx 8192 --decide-seq 16 \
+  --chat-pool 1   --chat-ctx 32768
 ```
 
 Decide workers want short records split many ways; 8k over 16 sequences gives 512
