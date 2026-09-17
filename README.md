@@ -150,12 +150,16 @@ What the model is given matters more than anything else measured here:
 |---|---|---|---|---|
 | the user's sentence alone | 77 | 0.423 | 50% | 0.538 |
 | plus one line of situation | 88 | 0.731 | 58% | 0.867 |
-| plus working tree, running jobs, recent turns | 245 | 0.769 | 58% | 0.933 |
-| **plus eight worked examples** | 423 | **0.846** | **73%** | **0.947** |
+| plus the tool descriptions | 294 | 0.769 | 65% | 0.941 |
+| plus real machine and repository state | 858 | 0.769 | 69% | 0.889 |
+| plus the last several turns verbatim | 1248 | 0.846 | 73% | 0.895 |
+| **plus ten worked examples** | 1456 | **0.923** | **81%** | **0.952** |
 
 Majority baseline is 0.346. So a starved record halves the accuracy, and the
 difference between a usable router and a poor one is mostly what you put in front
-of it.
+of it. The bottom four rows are not hand-written prose: `probe_realcontext.py`
+builds them from `git ls-files`, `git log`, `nvidia-smi` and the real
+conversation, which is what an agent harness actually has.
 
 **Examples are nearly free here, which is the structural point.** The record is
 prefilled once and every field reads from that same prefix, so state and examples
@@ -163,20 +167,30 @@ are paid for once per call however many questions follow:
 
 | questions in one call | seconds | per question |
 |---|---|---|
-| 1 | 0.55 | 547 ms |
-| 2 | 0.63 | 313 ms |
-| 4 | 0.78 | 194 ms |
-| 8 | 1.12 | 140 ms |
+| 1 | 1.78 | 1778 ms |
+| 2 | 1.89 | 946 ms |
+| 4 | 2.00 | 501 ms |
+| 8 | 2.18 | 272 ms |
 
-The same eight questions asked as eight separate calls take 4.37 s against 1.12 s
-in one — **3.9×** — because each call would otherwise re-read the whole prefix.
+That is against the full 1456-token record on the 27B. Going from one question to
+eight adds 0.40 s in total — **57 ms for each extra question** — because the
+record is read once and the seven extra sequences only add their own few tokens.
+The same eight as separate calls would each re-read all 1456 tokens.
+
 In an ordinary setup few-shot examples cost per call; here they cost once and
 serve the batch, so the thing that most improves accuracy is also the thing this
-design makes cheapest.
+design makes cheapest. And the effect grows with the record: at 423 tokens the
+spread was 547→140 ms, at 1456 tokens it is 1778→272 ms.
 
-**The honest operating point.** With a rich record, 73% of decisions come back
-above 0.85 confidence and are right 94.7% of the time; the remaining 27% should
-go to a bigger model or a person. Routing everything unconditionally gets 0.846.
+**The honest operating point.** With the full record, 81% of decisions come back
+above 0.85 confidence and are right 95.2% of the time; the remaining 19% should go
+to a bigger model or a person. Routing everything unconditionally gets 0.923.
+
+**Read the table, not the last row.** 26 cases means one decision is worth 0.038,
+so 0.846 and 0.923 are two cases apart and should not be treated as distinct. The
+claim that survives is the shape: a starved record scores near 0.42, a realistic
+one scores in the high 0.8s to low 0.9s, and the gap is the record rather than the
+model or the decoding.
 
 One thing tried and rejected: decomposing the seven-way choice into five binary
 questions plus a rule scored 0.615 against 0.731 on the same cases, even though
