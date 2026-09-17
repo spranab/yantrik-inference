@@ -61,8 +61,8 @@ that path, not to make that path faster.
 ```bash
 # answer questions about a record, once
 yantrik-inference decide -m model.gguf \
-  --record claim.txt \
-  --ask "Is the amount over 10000? ; Which region? | domestic/offshore/regional"
+  --record ticket.txt \
+  --ask "Is this a login problem? ; Which team should take it? | billing/identity/platform ; How urgent is it? | low/normal/high"
 
 #   yes       96.3%  Is this a login problem?
 #   identity  99.3%  Which team should take it?
