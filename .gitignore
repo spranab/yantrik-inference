@@ -13,3 +13,4 @@ runs/
 .DS_Store
 .idea/
 .vscode/
+sdf_out/
