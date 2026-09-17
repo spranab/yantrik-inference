@@ -226,6 +226,48 @@ reader does not change its answer when the options are permuted, so voting over
 permutations cannot add information.
 
 
+## A worked application: SDF Protocol
+
+[SDF](https://sdfprotocol.org) compiles a web page once into schema-validated
+JSON so agents stop re-extracting the same page. Most of its schema is closed
+sets, which makes it a fair test of this method on a problem nobody here
+designed.
+
+Its production pipeline asks an LLM for the type as JSON with a schema attached,
+parses it, repairs the JSON when parsing fails, and escalates to a bigger model
+when confidence is low. A typed read removes all four steps.
+
+Scored on 250 held-out pages against labels derived from URL structure rather
+than from any model, since the corpus's own labels are unreliable:
+
+| | typed read | the shipping pipeline |
+|---|---|---|
+| parent type | **0.928** | 0.864 |
+| full `parent.subtype` path | **0.912** | 0.847 |
+| output inside the declared taxonomy | **1.000** | 0.876 |
+
+Majority baseline 0.516; 2.78 s per page for eleven fields. 12.4% of the
+production corpus carries a type the pipeline's own JSON Schema enum forbids,
+despite the enum being sent with every request.
+
+Two structural points this makes concretely:
+
+**Conditional enums cost nothing.** A subtype only means something given its
+parent, which normally needs two round trips or one prompt trusted to stay
+consistent. Here the parent question and all ten subtype questions read one
+prefill of the page, and the subtype taken is the one belonging to the chosen
+parent, so the path cannot be inconsistent.
+
+**Read the closed part of an open answer.** Entity names have to be generated;
+entity *types* are eight fixed values. `sdf_convert.py` generates the names, then
+reads their types as one batched pass over the same page prefill. On eight live
+pages, all validating against the published schema, generation cost about four
+times the read every time.
+
+Full write-up, including a taxonomy defect this turned up in the SDF project
+itself, in [docs/sdf-protocol-2026-09-17.md](docs/sdf-protocol-2026-09-17.md).
+
+
 ## Adversarial testing
 
 The synthetic benchmark measures the happy path. `probe_adversarial.py` attacks

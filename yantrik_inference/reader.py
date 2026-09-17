@@ -81,6 +81,10 @@ class FieldReader:
         self.guard = guard
         self.ctx = ctx if ctx is not None else llm._ctx.ctx
         self.mem = Memory(C, self.ctx)
+        # llama_decode asserts if a batch exceeds n_batch, so long records have
+        # to be prefilled in pieces. Without this a page-sized record aborts the
+        # process rather than raising.
+        self.n_batch = int(getattr(llm, "n_batch", 512) or 512)
         self.n_vocab = llm.n_vocab()
         self._first: dict[str, int] = {}
 
@@ -187,16 +191,50 @@ class FieldReader:
                 f"the record plus a question is {longest} tokens but each sequence "
                 f"holds {self.per_seq}. Use a shorter record, fewer questions "
                 f"(--decide-seq), or a larger --decide-ctx.")
-        decode(self.C, self.ctx, prefix, range(P), [0] * P, [False] * P, self.n_vocab)
+        self.prefill(prefix)
         for i in range(1, len(suffixes)):
             self.mem.seq_cp(0, i)
-        toks, pos, seqs, want = [], [], [], []
+        return self._pick(self.ask(P, suffixes), fields)
+
+    def prefill(self, prefix: List[int]) -> None:
+        """Read the record into sequence 0, in n_batch-sized pieces.
+
+        The pieces are one sequence in order with no logits wanted, so splitting
+        is exact: the cache after the last piece is what one big batch would have
+        produced. This is what lets a record be as long as the context allows
+        rather than as long as a single batch.
+        """
+        B = self.n_batch
+        for off in range(0, len(prefix), B):
+            part = prefix[off:off + B]
+            decode(self.C, self.ctx, part, range(off, off + len(part)),
+                   [0] * len(part), [False] * len(part), self.n_vocab)
+
+    def ask(self, P: int, suffixes: List[List[int]]):
+        """Append each question to its own sequence and take the last logits.
+
+        Batched in groups of whole fields so a large field count cannot exceed
+        n_batch either. Fields in different sequences do not interact, so the
+        grouping changes nothing about the answers.
+        """
+        out, group, gtoks = [], [], 0
         for i, s in enumerate(suffixes):
+            if group and gtoks + len(s) > self.n_batch:
+                out += self._flush(P, group)
+                group, gtoks = [], 0
+            group.append((i, s)); gtoks += len(s)
+        if group:
+            out += self._flush(P, group)
+        return out
+
+    def _flush(self, P: int, group):
+        toks, pos, seqs, want = [], [], [], []
+        for i, s in group:
             for j, t in enumerate(s):
                 toks.append(t); pos.append(P + j); seqs.append(i)
                 want.append(j == len(s) - 1)
         got = decode(self.C, self.ctx, toks, pos, seqs, want, self.n_vocab)
-        return self._pick([got[i] for i in sorted(got)], fields)
+        return [got[k] for k in sorted(got)]
 
     def read_sequential(self, record: str, fields: Sequence[Field],
                         reuse_prefix: bool = True) -> List[Answer]:

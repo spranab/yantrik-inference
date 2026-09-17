@@ -24,6 +24,7 @@ class ChatEngine:
         self.ctx = self.lctx.ctx
         self.mem = Memory(C, self.ctx)
         self.n_ctx, self.n_vocab = n_ctx, llm.n_vocab()
+        self.n_batch = max(1, int(n_batch))
         self.tmpl = llm.metadata.get("tokenizer.chat_template")
         self.eos = {llm.token_eos()}
         for t in ("<|im_end|>", "<|endoftext|>", "<|eot_id|>"):
@@ -74,9 +75,19 @@ class ChatEngine:
         if len(ids) > budget:
             ids = ids[:1] + ids[-(budget - 1):]      # keep BOS, drop the middle
         self.mem.clear()
-        got = decode(self.C, self.ctx, ids, range(len(ids)), [0] * len(ids),
-                     [i == len(ids) - 1 for i in range(len(ids))], self.n_vocab)
-        logits = got[len(ids) - 1]
+        # llama_decode asserts if a batch is larger than n_batch, so a prompt
+        # longer than that has to be read in pieces. Only the last piece asks
+        # for logits; the earlier ones just fill the cache, which is exactly
+        # what one large batch would have done.
+        logits = None
+        for off in range(0, len(ids), self.n_batch):
+            part = ids[off:off + self.n_batch]
+            last = off + len(part) >= len(ids)
+            want = [last and j == len(part) - 1 for j in range(len(part))]
+            got = decode(self.C, self.ctx, part, range(off, off + len(part)),
+                         [0] * len(part), want, self.n_vocab)
+            if last:
+                logits = got[len(part) - 1]
         pos, buf, emitted = len(ids), b"", ""
         for _ in range(max_tokens):
             tok = self._sample(logits, temperature, top_p, rng)
