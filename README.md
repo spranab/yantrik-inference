@@ -183,6 +183,35 @@ questions plus a rule scored 0.615 against 0.731 on the same cases, even though
 each binary looked good alone. Ask the N-way question and gate on confidence.
 
 
+### Spending more where it is unsure does not help
+
+The obvious next move is adaptive compute: act on the confident fields, and give
+the uncertain ones a second, more expensive pass. Three versions were measured on
+the seven low-confidence fields of the routing set, all triggered at 0.85:
+
+| second pass | accuracy on those fields | extra cost |
+|---|---|---|
+| none | 0.571 | — |
+| let the model write a rationale first | **0.429** | 2.0 s per field |
+| runoff: binary against each rival | 0.571 | 3.4 s per field |
+| self-consistency: 5 permuted votes | 0.571 | 2.9 s per field |
+
+Nothing helped, and generating a rationale actively hurt. The confidence is not
+reporting "did not try hard enough"; it is reporting genuine ambiguity in the
+question. Looking at the seven cases, four are answered correctly at 50–75%
+confidence, and two of the three misses are defensible readings — "is it able to
+code?" could reasonably be answered rather than tested.
+
+So the right response to low confidence is **escalation, not more compute**: send
+it to a person, a larger model, or go and get more information. That last one is
+the only lever that moved anything in these measurements, and it belongs in the
+record before the first pass, not after it.
+
+Self-consistency returning identical results is a consistency check passing: the
+reader does not change its answer when the options are permuted, so voting over
+permutations cannot add information.
+
+
 ## Adversarial testing
 
 The synthetic benchmark measures the happy path. `probe_adversarial.py` attacks
