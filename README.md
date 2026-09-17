@@ -137,6 +137,52 @@ If a pool does not fit, the server builds a smaller one and says so rather than
 failing to start.
 
 
+## On real decisions, not a generated task
+
+The benchmark above scores 1.000 because the task generator writes clean records
+with the facts stated plainly. That is the ceiling of the generator, not of the
+method. `probe_selfroute.py` scores 26 real routing decisions taken from the
+session that built this repository, labelled with the tool actually used.
+
+What the model is given matters more than anything else measured here:
+
+| the record it sees | tokens | accuracy | ≥0.85 confidence | accuracy there |
+|---|---|---|---|---|
+| the user's sentence alone | 77 | 0.423 | 50% | 0.538 |
+| plus one line of situation | 88 | 0.731 | 58% | 0.867 |
+| plus working tree, running jobs, recent turns | 245 | 0.769 | 58% | 0.933 |
+| **plus eight worked examples** | 423 | **0.846** | **73%** | **0.947** |
+
+Majority baseline is 0.346. So a starved record halves the accuracy, and the
+difference between a usable router and a poor one is mostly what you put in front
+of it.
+
+**Examples are nearly free here, which is the structural point.** The record is
+prefilled once and every field reads from that same prefix, so state and examples
+are paid for once per call however many questions follow:
+
+| questions in one call | seconds | per question |
+|---|---|---|
+| 1 | 0.55 | 547 ms |
+| 2 | 0.63 | 313 ms |
+| 4 | 0.78 | 194 ms |
+| 8 | 1.12 | 140 ms |
+
+The same eight questions asked as eight separate calls take 4.37 s against 1.12 s
+in one — **3.9×** — because each call would otherwise re-read the whole prefix.
+In an ordinary setup few-shot examples cost per call; here they cost once and
+serve the batch, so the thing that most improves accuracy is also the thing this
+design makes cheapest.
+
+**The honest operating point.** With a rich record, 73% of decisions come back
+above 0.85 confidence and are right 94.7% of the time; the remaining 27% should
+go to a bigger model or a person. Routing everything unconditionally gets 0.846.
+
+One thing tried and rejected: decomposing the seven-way choice into five binary
+questions plus a rule scored 0.615 against 0.731 on the same cases, even though
+each binary looked good alone. Ask the N-way question and gate on confidence.
+
+
 ## Adversarial testing
 
 The synthetic benchmark measures the happy path. `probe_adversarial.py` attacks
