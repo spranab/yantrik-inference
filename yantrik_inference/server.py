@@ -11,7 +11,7 @@ from typing import Optional
 
 from .chat import ChatEngine
 from . import pool
-from .engine import Limits, chat_parts, load_model, second_context
+from .engine import Limits, chat_parts, context_cost, load_model, second_context
 from .reader import Field, FieldReader
 from .tasks import make_case
 from .ui import PAGE
@@ -29,10 +29,9 @@ class Service:
                  n_gpu_layers: int = -1, main_gpu: int = 0, split: bool = False,
                  sample_fields: int = 10, verbose: bool = False):
         t0 = time.time()
-        # A context's compute buffers scale with its batch size, and they cost far
-        # more than its cache: on a 27B an 8k context takes ~3.1 GB at n_batch 2048
-        # and ~1.5 GB at 512. Size each pool to the largest batch it will ever
-        # submit rather than to the default.
+        # Batch size only moves the compute buffer (about 0.5 GB at 512 against
+        # 2.0 GB at 2048 on a 27B), so size each pool to the largest batch it will
+        # actually submit. The dominant cost is elsewhere: see context_cost.
         decide_batch = min(n_batch, max(limits.per_seq, limits.decide_seq * 64, 512))
         chat_batch = min(n_batch, 512)
         self.decide_batch, self.chat_batch = decide_batch, chat_batch
@@ -42,6 +41,9 @@ class Service:
             split=split, kv_type=limits.kv_type, verbose=verbose)
         head, tail = chat_parts(self.llm)
         self.head, self.tail = head, tail
+        self.cost = dict(
+            decide=context_cost(self.llm, limits.decide_ctx, limits.decide_seq, limits.kv_type),
+            chat=context_cost(self.llm, limits.chat_ctx, 1, limits.kv_type))
 
         def make_reader(i: int) -> FieldReader:
             # worker 0 reuses the context the model was loaded with; the rest get
@@ -239,15 +241,27 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(service: Service, host: str, port: int):
+    # stdout is block-buffered when it is not a terminal, so a server that
+    # prints its configuration and then blocks would show nothing at all
+    # until it exits. Flush every line.
+    import functools
+    print = functools.partial(__builtins__['print'] if isinstance(__builtins__, dict)
+                              else __builtins__.print, flush=True)
     global SERVICE
     SERVICE = service
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"{service.name} ready in {service.load_s}s on {service.where}")
-    print(f"  decide  {len(service.readers)} worker(s) x "
-          f"{service.limits.decide_seq} sequences x {service.limits.per_seq} tokens")
-    print(f"  chat    {len(service.chats)} worker(s) x {service.limits.chat_ctx} tokens")
-    print(f"  cached  {service.limits.cache_tokens:,} tokens in total "
-          f"(batch {service.decide_batch}/{service.chat_batch})")
+    d, c = service.cost["decide"], service.cost["chat"]
+    print(f"  decide  {len(service.readers)} worker(s) x {service.limits.decide_seq} "
+          f"sequences x {service.limits.per_seq} tokens "
+          f"(~{d['kv_mib'] + d['recurrent_mib']} MiB each)")
+    print(f"  chat    {len(service.chats)} worker(s) x {service.limits.chat_ctx} tokens "
+          f"(~{c['kv_mib'] + c['recurrent_mib']} MiB each)")
+    if d["hybrid"]:
+        # the counter-intuitive part, said out loud because sizing depends on it
+        print(f"  note    this model keeps a per-sequence recurrent state: each "
+              f"sequence costs ~{d['per_sequence_mib']:.0f} MiB whatever the context "
+              f"length, so --decide-seq is the expensive knob, not --decide-ctx")
     print(f"  cache   {service.limits.kv_type}")
     print(f"  open    http://{'localhost' if host in ('0.0.0.0', '') else host}:{port}")
     try:

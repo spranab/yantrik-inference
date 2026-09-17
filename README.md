@@ -111,12 +111,29 @@ agent can route while a conversation is streaming.
 `GET /health` reports each pool's size, how many workers are idle, and how often a
 request had to queue — that last number is what tells you to raise a pool size.
 
-**Memory is the limit, not the design.** On a 24 GB card a 27B leaves room for
-about two decide workers and one chat worker. A context costs far more than its
-cache because of compute buffers: an 8k context is about 3.1 GB at a 2048 batch
-and 1.5 GB at 512, so each pool's batch is sized automatically to the largest one
-it will actually submit. If a pool does not fit, the server says so and builds a
-smaller one rather than failing to start.
+**Sizing: sequences cost, context is cheap.** On a hybrid model — Qwen3.x and
+anything else that mixes linear attention with full attention — most layers keep a
+fixed-size recurrent state *per sequence*, and that state does not care how long
+the context is. Measured on Qwen3.8-27B, per context, in MiB:
+
+| context | sequences | KV cache | recurrent state | total |
+|---|---|---|---|---|
+| 8k | 1 | 272 | 150 | 422 |
+| 8k | 16 | 272 | 2394 | 2666 |
+| 8k | 32 | 272 | 4788 | 5060 |
+| 32k | 1 | 1088 | 150 | 1238 |
+| 128k | 1 | 4352 | 150 | 4502 |
+
+A **128k** context with one sequence is cheaper than **8k** split 32 ways. So
+`--decide-seq` is the expensive knob: set it to the number of fields you really
+ask at once, and be generous with `--chat-ctx`, which is nearly free. The server
+prints the estimate for your model at startup, and it is derived from the model's
+own metadata rather than assumed — it matches llama.cpp's reported buffers within
+1.5% on the models tested. Batch size only moves the compute buffer, about 0.5 GB
+at 512 against 2.0 GB at 2048, and each pool sizes it automatically.
+
+If a pool does not fit, the server builds a smaller one and says so rather than
+failing to start.
 
 
 ## Use it

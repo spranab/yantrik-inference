@@ -42,9 +42,16 @@ class Limits:
 
     @property
     def cache_tokens(self) -> int:
-        """Total cached tokens across every worker, which is what the KV cache
-        costs. Weights are shared, so this is the only per-worker price."""
+        """Total cached tokens across every worker. Weights are shared, so the
+        per-worker cost is cache plus buffers, nothing more."""
         return self.decide_pool * self.decide_ctx + self.chat_pool * self.chat_ctx
+
+    @property
+    def sequences(self) -> int:
+        """Total sequences across every worker. On a hybrid (linear-attention)
+        model this is the number that costs, not the context length: each
+        sequence carries its own fixed-size recurrent state."""
+        return self.decide_pool * self.decide_seq + self.chat_pool
 
 
 def _patch_seq_max(C, n_seq: int):
@@ -131,6 +138,47 @@ def second_context(llm, C, *, n_ctx: int, n_batch: int, kv_type: str = "q8_0",
             f"but each worker needs its own cache and compute buffers; use a smaller "
             f"context, a smaller pool, or a smaller --n-batch."
         ) from e
+
+
+def context_cost(llm, n_ctx: int, n_seq: int, kv_type: str = "q8_0") -> dict:
+    """Estimate what one context will cost, in MiB, from the model's metadata.
+
+    Worth doing because the intuition from dense models is wrong here. On a
+    hybrid model most layers are linear attention, and each of those keeps a
+    fixed-size recurrent state PER SEQUENCE that does not depend on the context
+    length at all. Measured on Qwen3.8-27B: 150 MiB per sequence against 136 MiB
+    per 4k of context, so 32 sequences at 8k cost more than one sequence at 128k.
+    """
+    md = llm.metadata
+    def num(*keys, default=0):
+        for k in keys:
+            for full in (k, *(f"{p}.{k}" for p in ("qwen35", "qwen3", "llama", "general"))):
+                if full in md:
+                    try:
+                        return int(md[full])
+                    except (TypeError, ValueError):
+                        pass
+        return default
+
+    bytes_per = {"f16": 2.0, "q8_0": 1.0625, "q5_1": 0.75, "q4_0": 0.5625}.get(kv_type, 2.0)
+    layers = num("block_count", default=0)
+    interval = num("full_attention_interval", default=1) or 1
+    full_layers = max(1, layers // interval) if layers else 0
+    kv_heads = num("attention.head_count_kv", default=0)
+    k_len = num("attention.key_length", default=0)
+    v_len = num("attention.value_length", default=0)
+    kv_mib = full_layers * n_ctx * kv_heads * (k_len + v_len) * bytes_per / (1 << 20)
+
+    ssm_layers = max(0, layers - full_layers)
+    state = num("ssm.state_size")
+    inner, conv = num("ssm.inner_size"), num("ssm.conv_kernel")
+    # the recurrent state is inner_size x state_size in f32, plus the conv window;
+    # it is per sequence and does not grow with the context
+    per_seq = (inner * state * 4 + inner * conv * 4) / (1 << 20) if inner and state else 0.0
+    rs_mib = ssm_layers * n_seq * per_seq
+    return dict(kv_mib=round(kv_mib), recurrent_mib=round(rs_mib),
+                per_sequence_mib=round(per_seq * ssm_layers, 1),
+                hybrid=ssm_layers > 0)
 
 
 def chat_parts(llm):
