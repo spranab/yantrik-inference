@@ -161,3 +161,55 @@ claim.
 `sdf_gold.py` holds the URL rules. `sdf_convert.py` converts live URLs to SDF
 documents and validates them. `probe_taxonomy.py` compares the two vocabularies.
 `probe_cells.py` tests whether the per-sequence limit is real.
+
+---
+
+## Addendum: the same task against the real Jev API
+
+Added 2026-09-17, after installing TypeSafe's skill and getting API access.
+
+Everything above is a local reproduction of the mechanism TypeSafe's Jev exposes.
+`probe_jev.py` runs the real thing on exactly this task, with the same question
+set, the same category descriptions, and the same URL-derived gold, so the
+comparison is like for like. The eleven questions go in one request, which is what
+TypeSafe calls speculative fan-out: each subtype question states its own premise,
+and code takes the one belonging to the chosen parent.
+
+150 held-out pages, `jev-1.13.0`:
+
+| | Jev | local 27B | the SDF pipeline's stored labels |
+|---|---|---|---|
+| parent type | **0.940** | 0.928 | 0.847 |
+| full `parent.subtype` path | 0.902 | **0.912** | 0.833 |
+| seconds per page, 11 questions | **0.17** | 2.78 | — |
+
+Majority baseline 0.513. Jev used 2532 input tokens per page.
+
+Two things worth saying plainly.
+
+**On accuracy the hosted model and the local reproduction are indistinguishable.**
+0.940 against 0.928 is two pages out of 150, and on the full path the local
+reproduction is nominally ahead. Neither gap means anything at this sample size.
+
+**On speed they are not close.** 0.17 s against 2.78 s is about sixteen times, and
+that is a 27B model on one consumer GPU against a purpose-built hosted service.
+The mechanism reproduces. The engineering does not.
+
+Jev's calibration is good on this task:
+
+| confidence | pages | correct |
+|---|---|---|
+| 0.97 and above | 118 | 0.96 |
+| 0.85 to 0.97 | 23 | 0.96 |
+| 0.60 to 0.85 | 7 | 0.86 |
+| below 0.60 | 2 | 0.00 |
+
+**The errors are the same errors.** `documentation` misread as `reference`
+dominates for Jev, exactly as it does for the local reader. Two independent
+implementations failing on the same boundary is evidence the boundary itself is
+underdefined, not that either model is weak. It is the same boundary where the
+published spec and the shipping classifier disagree most.
+
+One caveat on matching: Jev received 6000 characters of page text and the local
+reader about 4800, since the local budget is set in tokens against a per-sequence
+limit. Close, not identical.
