@@ -17,3 +17,5 @@ sdf_out/
 _sum*.txt
 _msg.txt
 _patch.py
+jev_out/
+_js.txt
