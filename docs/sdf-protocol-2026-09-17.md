@@ -177,11 +177,15 @@ and code takes the one belonging to the chosen parent.
 
 150 held-out pages, `jev-1.13.0`:
 
-| | Jev | local 27B | the SDF pipeline's stored labels |
-|---|---|---|---|
-| parent type | **0.940** | 0.928 | 0.847 |
-| full `parent.subtype` path | 0.902 | **0.912** | 0.833 |
-| seconds per page, 11 questions | **0.17** | 2.78 | — |
+| | Jev | local 27B | local 4B | the SDF pipeline's stored labels |
+|---|---|---|---|---|
+| parent type | **0.940** | 0.928 | 0.873 | 0.847 |
+| full `parent.subtype` path | 0.902 | **0.912** | 0.863 | 0.833 |
+| seconds per page, 11 questions | 0.17 | 2.78 | 0.57 | — |
+
+The seconds column is not like for like and is decomposed below: the local
+figures are compute on one RTX 3090 Ti, the Jev figure is a network round trip
+with its compute hidden inside.
 
 Majority baseline 0.513. Jev used 2532 input tokens per page.
 
@@ -191,9 +195,41 @@ Two things worth saying plainly.
 0.940 against 0.928 is two pages out of 150, and on the full path the local
 reproduction is nominally ahead. Neither gap means anything at this sample size.
 
-**On speed they are not close.** 0.17 s against 2.78 s is about sixteen times, and
-that is a 27B model on one consumer GPU against a purpose-built hosted service.
-The mechanism reproduces. The engineering does not.
+**On speed the comparison as first written was wrong, and the correction matters
+more than the original claim.** 0.17 s against 2.78 s looked like sixteen times.
+It is not a model-against-model number. Timing the API against varying loads:
+
+| request | median |
+|---|---|
+| tiny state, 1 question | 167 ms |
+| tiny state, 11 questions | 178 ms |
+| 9000-character state (2969 tokens), 11 questions | 169 ms |
+
+Adding 2346 input tokens and ten questions costs nothing measurable. The whole
+0.17 s is round trip and fixed overhead; Jev's actual compute is buried beneath
+it and was never measured here. So the honest statement is that the local read
+takes 2.78 s of compute, and Jev answers inside a network round trip from this
+machine. The true compute ratio is unknown and larger than sixteen.
+
+**How much of the local 2.78 s is what.** Two terms were measured rather than
+assumed:
+
+- *Model size.* The same task, same GPU, on Qwen3.5-4B instead of the 27B: 0.57 s
+  per page, so 4.9× comes from size alone. It costs accuracy, dropping parent
+  type from 0.928 to 0.873 and the full path from 0.912 to 0.863.
+- *My own Python.* `decode()` fills a llama_batch with a per-token loop, which
+  looked like a suspect. It is 1.4 ms of a 2779 ms read, or 0.0%
+  (`probe_overhead.py`). Prefill runs at about 1400 tokens/s on this card. The
+  local number is GPU-bound.
+
+What is left after model size is hardware, serving stack and batching, and none of
+it is visible from outside the API.
+
+**The part hardware does not explain.** Jev returns 0.940 on this task. The local
+27B returns 0.928 and needs 2.78 s; the local 4B is quick but falls to 0.873.
+Jev is not a point on that speed-for-accuracy curve, it is off it. A faster card
+buys speed, not accuracy, so the gap is a purpose-trained model rather than a
+bigger machine. The mechanism reproduces. The model does not.
 
 Jev's calibration is good on this task:
 
