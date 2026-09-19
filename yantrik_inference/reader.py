@@ -87,9 +87,43 @@ class FieldReader:
         self.n_batch = int(getattr(llm, "n_batch", 512) or 512)
         self.n_vocab = llm.n_vocab()
         self._first: dict[str, int] = {}
+        # Shared-preamble cache. The last sequence id is reserved as a template
+        # holding the preamble's full state (attention KV and the recurrent
+        # state of every linear-attention layer); requests copy it instead of
+        # recomputing it. `_pre_key` is the preamble's exact token ids.
+        self.tpl = max_fields - 1
+        self._pre_key = None
+        self.cache_hits = self.cache_misses = 0
+        self.last_rows = None
 
     def framed(self, record: str) -> str:
         return GUARD.format(record=record) if self.guard else record
+
+    def _clear(self):
+        """Clear everything, including any cached preamble."""
+        self.mem.clear()
+        self._pre_key = None
+
+    def guard_parts(self):
+        """The guard split around the record, so a preamble can sit inside it."""
+        if not self.guard:
+            return "", ""
+        open_, close = GUARD.split("{record}")
+        return open_, close
+
+    def split_prompt(self, preamble: str, record: str):
+        """Token ids for (shared part, per-request part).
+
+        The two parts are tokenized separately, ALWAYS, so the cached and the
+        uncached split paths feed the model identical token ids. Tokenizing the
+        joined string instead could merge tokens across the boundary and make
+        the cache key depend on what follows it.
+        """
+        open_, close = self.guard_parts()
+        pre = self.tok(self.head, bos=True, special=True) + \
+            self.tok(open_ + preamble, special=False)
+        rest = self.tok(record + close, special=False)
+        return pre, rest
 
     # -- prompt pieces -------------------------------------------------------
     def tok(self, s: str, bos: bool = False, special: bool = True) -> List[int]:
@@ -171,9 +205,20 @@ class FieldReader:
         return self.tok(self.suffix_text(f), special=False) + self.tok(self.tail, special=True)
 
     # -- the read ------------------------------------------------------------
-    def read(self, record: str, fields: Sequence[Field]) -> List[Answer]:
+    def read(self, record: str, fields: Sequence[Field],
+             preamble: str | None = None) -> List[Answer]:
+        """Answer `fields` about `record`.
+
+        `preamble` is text that many requests share and that comes first, such
+        as a taxonomy, tool descriptions or standing instructions. Its state is
+        computed once and restored for every later request with the same
+        preamble, so only the record itself is prefilled. The answers are those
+        of the same split prompt computed from scratch, exactly.
+        """
         if not fields:
             return []
+        if preamble is not None:
+            return self._read_cached(preamble, record, fields)
         if len(fields) > self.max_fields:
             raise ValueError(
                 f"{len(fields)} questions but this context holds {self.max_fields} "
@@ -181,7 +226,7 @@ class FieldReader:
         problems = self.check_options(fields)
         if problems:
             raise ValueError("; ".join(problems))
-        self.mem.clear()
+        self._clear()
         prefix = self.tok_prompt(self.head, self.framed(record), bos=True)
         P = len(prefix)
         suffixes = [self.suffix_tokens(f) for f in fields]
@@ -196,8 +241,60 @@ class FieldReader:
             self.mem.seq_cp(0, i)
         return self._pick(self.ask(P, suffixes), fields)
 
-    def prefill(self, prefix: List[int]) -> None:
-        """Read the record into sequence 0, in n_batch-sized pieces.
+    def _checked(self, pre, rest, fields):
+        if len(fields) > self.tpl:
+            raise ValueError(
+                f"{len(fields)} questions but with a cached preamble this context "
+                f"holds {self.tpl} (one sequence is the template); start the "
+                f"server with a larger --decide-seq")
+        problems = self.check_options(fields)
+        if problems:
+            raise ValueError("; ".join(problems))
+        suffixes = [self.suffix_tokens(f) for f in fields]
+        longest = len(pre) + len(rest) + max(len(s) for s in suffixes)
+        if longest > self.per_seq:
+            raise ValueError(
+                f"the preamble, record and a question are {longest} tokens but "
+                f"each sequence holds {self.per_seq}.")
+        return suffixes
+
+    def _read_cached(self, preamble, record, fields):
+        pre, rest = self.split_prompt(preamble, record)
+        suffixes = self._checked(pre, rest, fields)
+        key = tuple(pre)
+        if self._pre_key != key:
+            self._clear()
+            self.prefill(pre, seq=self.tpl, start=0)
+            self._pre_key = key
+            self.cache_misses += 1
+        else:
+            for i in range(self.tpl):          # working sequences only
+                self.mem.seq_rm(i)
+            self.cache_hits += 1
+        self.mem.seq_cp(self.tpl, 0)
+        self.prefill(rest, seq=0, start=len(pre))
+        for i in range(1, len(suffixes)):
+            self.mem.seq_cp(0, i)
+        rows = self.ask(len(pre) + len(rest), suffixes)
+        self.last_rows = rows
+        return self._pick(rows, fields)
+
+    def read_split_uncached(self, preamble, record, fields):
+        """The reference the cache must equal: same split tokens, same chunk
+        boundaries, preamble recomputed every time."""
+        pre, rest = self.split_prompt(preamble, record)
+        suffixes = self._checked(pre, rest, fields)
+        self._clear()
+        self.prefill(pre, seq=0, start=0)
+        self.prefill(rest, seq=0, start=len(pre))
+        for i in range(1, len(suffixes)):
+            self.mem.seq_cp(0, i)
+        rows = self.ask(len(pre) + len(rest), suffixes)
+        self.last_rows = rows
+        return self._pick(rows, fields)
+
+    def prefill(self, tokens: List[int], seq: int = 0, start: int = 0) -> None:
+        """Read tokens into one sequence from position `start`, in n_batch pieces.
 
         The pieces are one sequence in order with no logits wanted, so splitting
         is exact: the cache after the last piece is what one big batch would have
@@ -205,10 +302,10 @@ class FieldReader:
         rather than as long as a single batch.
         """
         B = self.n_batch
-        for off in range(0, len(prefix), B):
-            part = prefix[off:off + B]
-            decode(self.C, self.ctx, part, range(off, off + len(part)),
-                   [0] * len(part), [False] * len(part), self.n_vocab)
+        for off in range(0, len(tokens), B):
+            part = tokens[off:off + B]
+            decode(self.C, self.ctx, part, range(start + off, start + off + len(part)),
+                   [seq] * len(part), [False] * len(part), self.n_vocab)
 
     def ask(self, P: int, suffixes: List[List[int]]):
         """Append each question to its own sequence and take the last logits.
@@ -239,7 +336,7 @@ class FieldReader:
     def read_sequential(self, record: str, fields: Sequence[Field],
                         reuse_prefix: bool = True) -> List[Answer]:
         """The same answers, one field per pass. Kept for `bench`."""
-        self.mem.clear()
+        self._clear()
         prefix = self.tok_prompt(self.head, self.framed(record), bos=True)
         P = len(prefix)
         if reuse_prefix:
@@ -255,7 +352,7 @@ class FieldReader:
                 rows.append(got[len(s) - 1])
                 self.mem.seq_rm(1)
             else:
-                self.mem.clear()
+                self._clear()
                 full = prefix + s
                 got = decode(self.C, self.ctx, full, range(len(full)), [0] * len(full),
                              [j == len(full) - 1 for j in range(len(full))], self.n_vocab)
@@ -301,7 +398,7 @@ class FieldReader:
         if generate is not None:
             txt = generate(body, max_new)
         else:
-            self.mem.clear()
+            self._clear()
             out = self.llm.create_completion(self.head + body + self.tail,
                                              max_tokens=max_new, temperature=0.0)
             txt = out["choices"][0]["text"]

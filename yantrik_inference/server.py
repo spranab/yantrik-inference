@@ -167,12 +167,21 @@ class Handler(BaseHTTPRequestHandler):
             with s.readers.acquire() as reader:
                 t0 = time.time()
                 if not as_json:
-                    answers = reader.read(record, fields)
+                    # `preamble`: text shared by many requests (a taxonomy, tool
+                    # descriptions, standing instructions). Its state is computed
+                    # once per reader and copied, bit-exactly, for later requests.
+                    preamble = req.get("preamble")
+                    hits0 = reader.cache_hits
+                    answers = reader.read(record, fields,
+                                          preamble=preamble if preamble else None)
                     dt = time.time() - t0
-                    return self._send(200, json.dumps(dict(
-                        seconds=round(dt, 4), model=s.name,
-                        answers=[dict(question=a.question, answer=a.answer,
-                                      confidence=round(a.confidence, 4)) for a in answers])))
+                    out = dict(seconds=round(dt, 4), model=s.name,
+                               answers=[dict(question=a.question, answer=a.answer,
+                                             confidence=round(a.confidence, 4))
+                                        for a in answers])
+                    if preamble:
+                        out["preamble_cached"] = reader.cache_hits > hits0
+                    return self._send(200, json.dumps(out))
                 prompt_len = len(reader.tok(reader.head + record, bos=True)) + 40 * len(fields)
                 room = s.limits.per_seq - prompt_len - 16
                 if room < 120:

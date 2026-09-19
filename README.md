@@ -344,6 +344,36 @@ curl localhost:8020/v1/decide -H 'content-type: application/json' -d '{
   {"question": "How urgent is it?", "answer": "normal", "confidence": 0.713}]}
 ```
 
+### A shared preamble is computed once
+
+Most decision workloads start every request with the same text: a taxonomy,
+tool descriptions, routing rules. Pass it as `preamble` and the server computes
+its state once, then copies it into each later request instead of recomputing it:
+
+```bash
+curl localhost:8020/v1/decide -H 'content-type: application/json' -d '{
+  "preamble": "You route support tickets. Teams: billing (payments, refunds), identity (logins, 2FA), platform (outages).\n\nTICKET\n",
+  "record": "Ticket 4471: customer cannot log in after the password reset email never arrived.",
+  "questions": ["Which team should take it? | billing/identity/platform"]}'
+```
+
+The response carries `"preamble_cached": true` from the second request on. On a
+hybrid model the copied state includes every linear-attention layer's recurrent
+state as well as the attention cache. Measured on Qwen3.8-27B with the SDF task
+(466-token preamble, 80 held-out pages, `probe_prefix.py`):
+
+| | result |
+|---|---|
+| cached vs the same prompt recomputed from scratch | bit-identical logits on 80/80 pages |
+| speedup over an ordinary read | 1.33x mean, 1.35x median |
+| accuracy | unchanged, 0.900 either way |
+
+The preamble and the record are tokenized separately, so a preamble request is
+not token-for-token the same prompt as sending the joined string as `record`:
+20 of 880 answers differed from the joined-string read, all without changing
+accuracy. The saving grows with the preamble's share of the prompt: on short
+tickets behind a longer instruction block it measured 2.6x.
+
 Chat is OpenAI-compatible on the same port, so existing code only changes its
 base URL:
 
