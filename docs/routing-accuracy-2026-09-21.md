@@ -121,7 +121,7 @@ Names fixed 0 cases and broke 2, p = 0.50. The indirection through a letter is
 not costing anything, which also means that teaching the engine to score whole
 option strings would buy convenience, not accuracy.
 
-## What to do about low confidence: escalate
+## Low confidence means the catalogue, not the compute
 
 Gating on the reported confidence, on the best arm:
 
@@ -133,13 +133,54 @@ Gating on the reported confidence, on the best arm:
 | 0.97 | 0.78 | 0.989 | 0.662 |
 | 0.99 | 0.73 | 0.996 | 0.704 |
 
-The confidence is informative: at 0.97, 78% of decisions are right 98.9% of the
-time and the 22% held back would have been right 66% of the time. An agent that
-routes the confident ones typed and sends the rest to the model gets most of the
-speed and almost none of the errors. This matches the earlier finding on typed
-page reading, where second passes — rationales, runoffs, self-consistency — did
-nothing, and the useful response to low confidence was escalation rather than
-more compute.
+The confidence separates cleanly: at 0.97, 78% of decisions are right 98.9% of
+the time, and the 22% below would have been right 66% of the time. The obvious
+next move is to send that 22% to a generation, and the obvious next move is
+wrong.
+
+The same 207 cases were put through `/v1/chat/completions` with byte-identical
+prompt text — the same guard wrapper, the same preamble, the same question
+suffix the engine appends — so that only the decoding differed. A control sample
+of 150 cases from above the gate went through the same two paths.
+
+| | typed | generated | paired |
+|---|---|---|---|
+| below 0.97 (n=207) | **0.662** | 0.638 ±0.065 | 13 fixed, 18 broke, p=0.47 |
+| above 0.97 (n=150) | 0.993 | 0.993 ±0.013 | 0 fixed, 0 broke, p=1.00 |
+| whole benchmark | **0.916** | 0.911 if the low ones are generated | |
+
+Generating does not rescue a single low-confidence decision on net; it costs
+886 ms against 150 ms and ends up marginally worse. And on the control it
+reproduced the typed answer on all 150 cases, which is the strongest statement
+available that the typed read is not an approximation of generation — where the
+model is confident, the argmax over allowed first tokens *is* what generation
+emits, five to ten times faster.
+
+The reason is visible in where the low-confidence cases live:
+
+| cases | below 0.97 | of those, wrong | cluster |
+|---|---|---|---|
+| 120 | 60 | 25 | `calculate_age \| calculate_median \| calculate_standard_deviation \| std_deviation` (duplicate spec) |
+| 60 | 57 | 24 | `calculate_factorial \| factorial` (duplicate spec) |
+| 60 | 44 | 12 | `is_anagram \| is_anagram_phrase` (distinction absent from the request) |
+| 60 | 20 | 6 | `calculate_distance \| euclidean_distance` (distinction absent from the request) |
+| 90 | 21 | 2 | `is_perfect_square \| is_power \| is_power_of_two` |
+| 480 | 5 | 1 | the remaining eight clusters |
+
+The 207 low-confidence cases hold 70 of the 78 errors, and 87% of them come from
+four clusters whose options the request does not distinguish. Five clusters
+produce no low-confidence case at all. So low confidence here is not the model
+hesitating over something a larger budget would resolve — the information is
+absent, and no decoding strategy invents it. This is the same shape as the
+earlier finding on typed page reading, where rationales, runoffs and
+self-consistency all did nothing.
+
+What the gate is good for, then, is triage rather than escalation: below it, the
+catalogue is telling you that two of its options are the same option, or that the
+request does not carry the fact that separates them. The fixes are to merge the
+duplicate, to add the distinguishing argument to the request, or to ask the user.
+Sending it to a bigger prompt is the one thing that has been measured not to
+work.
 
 ## The ten-case failure was the question
 
@@ -175,17 +216,19 @@ which is what a confidence gate is spending.
 4. Check the catalogue for pairs that cannot be told apart. They cap accuracy
    whatever the prompt says, and they are visible in the specs.
 5. Label options rather than fight the tokenizer. It costs nothing.
-6. Gate on confidence and escalate what falls below. At 0.97 that is 78% of
-   decisions at 0.989.
+6. Gate on confidence, but treat what falls below it as a report about the
+   catalogue rather than a case for more compute. At 0.97 the gate keeps 78% of
+   decisions at 0.989; generating the other 22% was measured and made them
+   slightly worse at six times the latency.
 
 ## Reproducing
 
 `probes/routing/` in this repo: `build.py` and `build_hard.py` construct the two
 benchmarks from a local copy of xlam-function-calling-60k, `sharpen.py` generates
-the boundary rules, `run.py` and `run_hard.py` run the arm ladders, and
-`names_vs_letters.py` and `probe_router.py` run the two side experiments. Start
-the fork's server with `--decide-ctx 32768 --decide-seq 4` and point the scripts
-at it.
+the boundary rules, `run.py` and `run_hard.py` run the arm ladders,
+`escalate.py` runs the generated arm against the gate, and `names_vs_letters.py`
+and `probe_router.py` run the two side experiments. Start the fork's server with
+`--decide-ctx 32768 --decide-seq 4` and point the scripts at it.
 
 A third benchmark was attempted and abandoned: predicting the tool an agent
 actually used next, from a local corpus of 412 Claude Code transcripts. After
